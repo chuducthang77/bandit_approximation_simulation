@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=pg_cmp_combine
-#SBATCH --account=YOUR_ACCOUNT_HERE
+#SBATCH --account=def-szepesva
 #SBATCH --time=00:30:00
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=4G

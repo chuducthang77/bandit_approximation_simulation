@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=pg_gap_sweep
-#SBATCH --account=def-szepesva:wq
+#SBATCH --account=def-szepesva
 #SBATCH --time=1:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G

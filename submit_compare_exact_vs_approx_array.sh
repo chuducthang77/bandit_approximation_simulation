@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=pg_cmp_exact_approx
-#SBATCH --account=YOUR_ACCOUNT_HERE
+#SBATCH --account=def-szepesva
 #SBATCH --time=06:00:00
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
