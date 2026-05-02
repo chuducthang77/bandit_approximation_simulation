@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=pg_sweep
-#SBATCH --account=YOUR_ACCOUNT_HERE
+#SBATCH --account=def-szepesva
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

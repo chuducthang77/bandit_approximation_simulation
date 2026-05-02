@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=pg_validate
-#SBATCH --account=YOUR_ACCOUNT_HERE
+#SBATCH --account=def-szepesva
 #SBATCH --time=06:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
