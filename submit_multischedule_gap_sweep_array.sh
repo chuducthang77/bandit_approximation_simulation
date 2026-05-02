@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=pg_multi_sweep
 #SBATCH --account=def-szepesva
-#SBATCH --time=12:00:00
+#SBATCH --time=1:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --array=0-605%100
