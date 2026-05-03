@@ -26,4 +26,4 @@ test -f run_pg_bandit_experiments.py
 python run_pg_bandit_experiments.py plot-history \
   --outdir multi_schedule_results \
   --regret-scale 1000000 \
-  --show-bands  
+  --show-bands
