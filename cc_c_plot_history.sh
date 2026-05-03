@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=pg_c_plot_history
-#SBATCH --account=YOUR_ACCOUNT_HERE
+#SBATCH --account=def-szepesva
 #SBATCH --time=01:00:00
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=4G
