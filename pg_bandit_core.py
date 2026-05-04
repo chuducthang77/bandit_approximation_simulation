@@ -69,18 +69,23 @@ def select_schedules(slugs: Optional[str]) -> List[ScheduleSpec]:
 
 
 def eta_value(schedule: ScheduleSpec, t: np.ndarray | float | int) -> np.ndarray | float:
-    """Evaluate eta_t for scalar or numpy-array times t >= 1."""
+    """Evaluate eta_t for scalar or numpy-array times t >= 1.
+
+    All log-based schedules use log(max(t, 2)).  This avoids the singular or
+    zero first step at t=1 and matches the short-horizon debugging scripts.
+    """
     x = np.asarray(t, dtype=np.float64)
     x_safe = np.maximum(x, 1.0)
+    log_safe = np.log(np.maximum(x_safe, 2.0))
 
     if schedule.kind == "power":
         value = np.power(x_safe, -float(schedule.power))
     elif schedule.kind == "log_over_t":
-        value = np.log(x_safe) / x_safe
+        value = log_safe / x_safe
     elif schedule.kind == "sqrt_log_over_t":
-        value = np.sqrt(np.maximum(np.log(x_safe), 0.0) / x_safe)
+        value = np.sqrt(log_safe / x_safe)
     elif schedule.kind == "inv_log_t":
-        value = 1.0 / np.log(np.maximum(x_safe, 2.0))
+        value = 1.0 / log_safe
     else:
         raise ValueError(f"Unknown schedule kind: {schedule.kind}")
 
@@ -151,27 +156,37 @@ def _power_sum_euler_maclaurin(start_time: int, block_size: int, power: float) -
 
 
 def _log_over_t_sum(start_time: int, block_size: int, squared: bool) -> float:
-    """Approximate sum log(t)/t or sum (log(t)/t)^2."""
+    """Approximate sum log(max(t, 2))/t or its square.
+
+    For integer times only t=1 differs from log(t)/t.  We add that term
+    exactly and use Euler--Maclaurin on the remaining t >= 2 range.
+    """
     if block_size <= 0:
         return 0.0
+
+    if start_time == 1:
+        first = math.log(2.0)
+        first = first * first if squared else first
+        if block_size == 1:
+            return float(first)
+        return float(first + _log_over_t_sum(2, block_size - 1, squared))
+
     if block_size == 1:
-        val = math.log(max(float(start_time), 1.0)) / max(float(start_time), 1.0)
+        val = math.log(float(start_time)) / float(start_time)
         return val * val if squared else val
 
     a = float(start_time)
     b = float(start_time + block_size - 1)
 
     if not squared:
-        la = math.log(max(a, 1.0))
-        lb = math.log(max(b, 1.0))
+        la = math.log(a)
+        lb = math.log(b)
         integral = 0.5 * (lb * lb - la * la)
 
         def f(x: float) -> float:
-            return math.log(max(x, 1.0)) / max(x, 1.0)
+            return math.log(x) / x
 
         def fp(x: float) -> float:
-            if x <= 1.0:
-                return 1.0
             return (1.0 - math.log(x)) / (x * x)
 
         estimate = integral + 0.5 * (f(a) + f(b)) + (fp(b) - fp(a)) / 12.0
@@ -179,18 +194,14 @@ def _log_over_t_sum(start_time: int, block_size: int, squared: bool) -> float:
 
     # Integral of log(x)^2 / x^2 is -(log(x)^2 + 2log(x) + 2) / x.
     def antiderivative(x: float) -> float:
-        xs = max(x, 1.0)
-        lx = math.log(xs)
-        return -(lx * lx + 2.0 * lx + 2.0) / xs
+        lx = math.log(x)
+        return -(lx * lx + 2.0 * lx + 2.0) / x
 
     def f2(x: float) -> float:
-        xs = max(x, 1.0)
-        lx = math.log(xs)
-        return (lx / xs) ** 2
+        lx = math.log(x)
+        return (lx / x) ** 2
 
     def f2p(x: float) -> float:
-        if x <= 1.0:
-            return 0.0
         lx = math.log(x)
         return 2.0 * lx * (1.0 - lx) / (x ** 3)
 
@@ -223,6 +234,18 @@ def learning_rate_sums(
     """Return sum eta_t and sum eta_t^2 over one block."""
     if block_size <= exact_sum_threshold:
         return _exact_eta_sums(schedule, start_time, block_size)
+
+    # For log-based schedules, t=1 is regularized with log(2).  Handle that
+    # point exactly before applying large-block approximations.
+    if start_time == 1 and schedule.kind in {"log_over_t", "sqrt_log_over_t", "inv_log_t"}:
+        eta1 = float(eta_value(schedule, 1))
+        rest_sum, rest_sum_sq = learning_rate_sums(
+            schedule,
+            2,
+            block_size - 1,
+            exact_sum_threshold,
+        )
+        return eta1 + rest_sum, eta1 * eta1 + rest_sum_sq
 
     if schedule.kind == "power":
         p = float(schedule.power)

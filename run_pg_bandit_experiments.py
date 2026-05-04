@@ -6,6 +6,7 @@ The algorithmic code is in pg_bandit_core.py. This file only handles:
   - command-line arguments,
   - multiprocessing and CSV files,
   - hardest-gap selection,
+  - horizon-wise hardest-gap envelope selection,
   - plotting the attached regret-history figure in three scales,
   - optional exact-vs-approx validation at T=100k,
   - optional SLURM template generation.
@@ -26,6 +27,11 @@ Common workflow:
 
   # 5) Validate exact vs approximate updates at T=100k.
   python run_pg_bandit_experiments.py validate --horizon 100000 --trajectories 1000
+
+  # Alternative: hardest possible regret at every intermediate horizon.
+  # This computes max_Delta R_t(Delta) separately at each checkpoint t.
+  python run_pg_bandit_experiments.py envelope-sweep --run-all
+  python run_pg_bandit_experiments.py combine-envelope --plot
 """
 
 from __future__ import annotations
@@ -105,6 +111,12 @@ def parse_float_list(text: Optional[str]) -> Optional[List[float]]:
     if text is None or text.strip() == "":
         return None
     return [float(x.strip()) for x in text.split(",") if x.strip()]
+
+
+def parse_int_list(text: Optional[str]) -> Optional[List[int]]:
+    if text is None or text.strip() == "":
+        return None
+    return [int(x.strip()) for x in text.split(",") if x.strip()]
 
 
 def write_csv(path: pathlib.Path, rows: Sequence[dict]) -> None:
@@ -576,6 +588,307 @@ def plot_history(args: argparse.Namespace) -> None:
     )
 
 
+
+# ---------------------------------------------------------------------------
+# Horizon-wise hardest-gap envelope
+# ---------------------------------------------------------------------------
+
+
+def horizon_grid_from_args(args: argparse.Namespace) -> np.ndarray:
+    """Return the horizons at which to compute max_Delta R_t(Delta).
+
+    This is the grid for the envelope experiment.  The default is intentionally
+    much smaller than 1e9: a log-spaced grid up to 1e7 is usually enough to see
+    the finite-horizon scaling without making the sweep too expensive.
+    """
+    explicit = parse_int_list(getattr(args, "horizon_values", None))
+    if explicit is not None:
+        pts = np.unique(np.asarray(explicit, dtype=np.int64))
+        pts = pts[pts >= 1]
+        if pts.size == 0:
+            raise ValueError("--horizon-values must contain at least one positive integer")
+        return pts
+
+    return log_spaced_checkpoints(
+        int(args.horizon),
+        int(args.num_horizons),
+        include_early=False,
+    )
+
+
+def run_envelope_sweep(args: argparse.Namespace) -> None:
+    """Run one or more schedule-gap tasks and record all horizon checkpoints.
+
+    A single task simulates one fixed gap to the largest horizon and records
+    mean regret at all checkpoints.  Combining across gaps then gives
+        R_star(t) = max_Delta R_t(Delta)
+    without rerunning a separate sweep for every horizon t.
+    """
+    outdir = pathlib.Path(args.outdir)
+    workers = args.workers if args.workers is not None else default_workers()
+    block_config = block_config_from_args(args)
+    checkpoints = horizon_grid_from_args(args)
+    max_horizon = int(np.max(checkpoints))
+
+    for schedule_index, schedule, gap_index, gap in sweep_task_indices(args):
+        sweep_dir = outdir / "envelope_sweep" / schedule.slug
+        output_path = sweep_dir / f"gap_{gap_index:04d}.csv"
+        if output_path.exists() and not args.overwrite:
+            print(f"[skip] {output_path} exists. Use --overwrite to recompute.", flush=True)
+            continue
+
+        seed = int(args.seed + 90_000_071 * schedule_index + 1_000_003 * gap_index)
+        result = simulate_parallel(
+            schedule_slug=schedule.slug,
+            gap_arm2=gap,
+            method="approx",
+            horizon_steps=max_horizon,
+            num_arms=int(args.num_arms),
+            num_trajectories=int(args.trajectories),
+            random_seed=seed,
+            workers=workers,
+            chunk_trajectories=args.chunk_trajectories,
+            checkpoints=checkpoints,
+            block_config=block_config,
+            return_trajectory_samples=False,
+        )
+
+        rows = []
+        for i, t in enumerate(result.checkpoint_times):
+            rows.append({
+                "schedule_index": schedule_index,
+                "schedule_slug": schedule.slug,
+                "schedule_label": schedule.label,
+                "gap_index": gap_index,
+                "gap_arm2": gap,
+                "time": int(t),
+                "mean_regret": float(result.mean_regret[i]),
+                "standard_error": float(result.se_regret[i]),
+                "mean_pi1": float(result.mean_pi1[i]),
+                "se_pi1": float(result.se_pi1[i]),
+                "num_trajectories": result.num_trajectories,
+                "horizon_steps": max_horizon,
+                "num_arms": result.num_arms,
+                "method": "approx",
+                "experiment": "horizon_wise_gap_envelope",
+                "exact_small_block_threshold": block_config.exact_small_block_threshold,
+                "max_mean_change": block_config.max_mean_change,
+                "max_noise_change": block_config.max_noise_change,
+                "block_quantile": block_config.block_quantile,
+                "num_blocks_total": result.num_blocks,
+            })
+        write_csv(output_path, rows)
+
+
+def combine_envelope(args: argparse.Namespace) -> None:
+    """Combine envelope sweep files and select hardest gap separately at each time."""
+    outdir = pathlib.Path(args.outdir)
+    paths = sorted((outdir / "envelope_sweep").glob("*/gap_*.csv"))
+    if not paths:
+        raise FileNotFoundError(f"No envelope sweep CSV files found under {outdir / 'envelope_sweep'}")
+
+    rows: List[dict] = []
+    for path in paths:
+        rows.extend(read_csv(path))
+
+    rows.sort(key=lambda r: (int(r["schedule_index"]), int(r["time"]), int(r["gap_index"])))
+    combined_path = outdir / "combined_envelope_sweep.csv"
+    write_csv(combined_path, rows)
+
+    by_schedule_time: Dict[Tuple[str, int], List[dict]] = {}
+    for row in rows:
+        key = (row["schedule_slug"], int(row["time"]))
+        by_schedule_time.setdefault(key, []).append(row)
+
+    hardest_rows = []
+    for key, group in by_schedule_time.items():
+        best = max(group, key=lambda r: float(r["mean_regret"]))
+        # Rename the selected gap columns for clarity while preserving the raw row.
+        best = dict(best)
+        best["hardest_gap_index"] = best["gap_index"]
+        best["hardest_gap_arm2"] = best["gap_arm2"]
+        hardest_rows.append(best)
+
+    hardest_rows.sort(key=lambda r: (int(r["schedule_index"]), int(r["time"])))
+    hardest_path = outdir / "hardest_gap_by_time.csv"
+    write_csv(hardest_path, hardest_rows)
+
+    print("\nHorizon-wise hardest gaps at final recorded time:", flush=True)
+    final_by_schedule: Dict[str, dict] = {}
+    for row in hardest_rows:
+        slug = row["schedule_slug"]
+        if slug not in final_by_schedule or int(row["time"]) > int(final_by_schedule[slug]["time"]):
+            final_by_schedule[slug] = row
+    for slug, row in sorted(final_by_schedule.items(), key=lambda x: int(x[1]["schedule_index"])):
+        print(
+            f"  {slug:20s} T={int(row['time']):>10d} "
+            f"Delta_t={float(row['hardest_gap_arm2']):.6g} "
+            f"mean_regret={float(row['mean_regret']):.6e}",
+            flush=True,
+        )
+
+    if getattr(args, "plot", False):
+        plot_envelope(args)
+
+
+def load_envelope(outdir: pathlib.Path) -> List[Tuple[object, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    hardest_path = outdir / "hardest_gap_by_time.csv"
+    if not hardest_path.exists():
+        raise FileNotFoundError(f"Missing {hardest_path}. Run combine-envelope first.")
+
+    rows = read_csv(hardest_path)
+    by_schedule: Dict[str, List[dict]] = {}
+    for row in rows:
+        by_schedule.setdefault(row["schedule_slug"], []).append(row)
+
+    envelopes = []
+    for schedule in all_schedules():
+        group = by_schedule.get(schedule.slug)
+        if not group:
+            continue
+        group.sort(key=lambda r: int(r["time"]))
+        t = np.asarray([int(r["time"]) for r in group], dtype=np.float64)
+        mean = np.asarray([float(r["mean_regret"]) for r in group], dtype=np.float64)
+        se = np.asarray([float(r["standard_error"]) for r in group], dtype=np.float64)
+        gap = np.asarray([float(r["hardest_gap_arm2"]) for r in group], dtype=np.float64)
+        envelopes.append((schedule, t, mean, se, gap))
+    return envelopes
+
+
+def make_one_envelope_plot(
+    envelopes: Sequence[Tuple[object, np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
+    outpath: pathlib.Path,
+    regret_scale: float,
+    xscale: str,
+    yscale: str,
+    show_bands: bool,
+    include_baselines: bool,
+) -> None:
+    if plt is None:
+        raise RuntimeError("matplotlib is unavailable")
+
+    fig, ax = plt.subplots(figsize=(9.2, 6.0), dpi=180)
+
+    for schedule, t, mean, se, gap in envelopes:
+        label = f"{schedule.label}, horizon-wise hardest $\\Delta_t$"
+        y = mean / regret_scale
+        ax.plot(t, y, linewidth=2.2, label=label)
+        if show_bands:
+            ax.fill_between(
+                t,
+                (mean - 2.0 * se) / regret_scale,
+                (mean + 2.0 * se) / regret_scale,
+                alpha=0.08,
+                linewidth=0,
+            )
+
+    if include_baselines and envelopes:
+        t_ref = envelopes[0][1]
+        baselines = [
+            (0.5, r"raw $\sqrt{T}$"),
+            (2.0 / 3.0, r"raw $T^{2/3}$"),
+            (1.0, r"raw $T$"),
+        ]
+        for alpha, label in baselines:
+            ax.plot(
+                t_ref,
+                np.power(t_ref, alpha) / regret_scale,
+                linestyle="--",
+                linewidth=1.8,
+                alpha=0.85,
+                label=label,
+            )
+
+    if xscale == "log":
+        ax.set_xscale("log")
+    if yscale == "log":
+        ax.set_yscale("log")
+
+    ax.set_xlabel("Horizon / time")
+    ax.set_ylabel("Worst-gap average cumulative regret" if regret_scale == 1.0 else rf"Worst-gap average cumulative regret / ${regret_scale:.0e}$")
+    ax.set_title(r"Horizon-wise hardest regret envelope, $\max_{\Delta} R_t(\Delta)$")
+    ax.grid(True, alpha=0.35)
+    ax.legend(frameon=True, fontsize=8)
+    fig.tight_layout()
+    fig.savefig(outpath, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[plot] {outpath}", flush=True)
+
+
+def plot_envelope(args: argparse.Namespace) -> None:
+    outdir = pathlib.Path(args.outdir)
+    envelopes = load_envelope(outdir)
+    if not envelopes:
+        raise RuntimeError("No envelope rows loaded")
+
+    scale = float(args.regret_scale)
+    include_baselines = not getattr(args, "no_baselines", False)
+    show_bands = bool(getattr(args, "show_bands", False))
+
+    make_one_envelope_plot(
+        envelopes,
+        outdir / "envelope_hardest_regret_linear_scale.png",
+        scale,
+        xscale="linear",
+        yscale="linear",
+        show_bands=show_bands,
+        include_baselines=include_baselines,
+    )
+    make_one_envelope_plot(
+        envelopes,
+        outdir / "envelope_hardest_regret_logx.png",
+        scale,
+        xscale="log",
+        yscale="linear",
+        show_bands=show_bands,
+        include_baselines=include_baselines,
+    )
+    make_one_envelope_plot(
+        envelopes,
+        outdir / "envelope_hardest_regret_loglog.png",
+        scale,
+        xscale="log",
+        yscale="log",
+        show_bands=show_bands,
+        include_baselines=include_baselines,
+    )
+
+    if plt is None:
+        return
+
+    # Plot the selected hardest gap as a function of horizon.
+    fig, ax = plt.subplots(figsize=(9.2, 5.4), dpi=180)
+    for schedule, t, mean, se, gap in envelopes:
+        ax.plot(t, gap, linewidth=2.2, marker="o", markersize=3, label=schedule.label)
+    ax.set_xscale("log")
+    ax.set_xlabel("Horizon / time")
+    ax.set_ylabel(r"Selected hardest gap $\Delta_t$")
+    ax.set_title(r"Gap selected by $\arg\max_{\Delta} R_t(\Delta)$")
+    ax.set_ylim(-0.02, 1.02)
+    ax.grid(True, alpha=0.35)
+    ax.legend(frameon=True, fontsize=8)
+    fig.tight_layout()
+    outpath = outdir / "envelope_hardest_gap_vs_time.png"
+    fig.savefig(outpath, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[plot] {outpath}", flush=True)
+
+    # Plot R_t/t, which is the most direct diagnostic for almost-linear regret.
+    fig, ax = plt.subplots(figsize=(9.2, 5.4), dpi=180)
+    for schedule, t, mean, se, gap in envelopes:
+        ax.plot(t, mean / t, linewidth=2.2, label=schedule.label)
+    ax.set_xscale("log")
+    ax.set_xlabel("Horizon / time")
+    ax.set_ylabel(r"Worst-gap average regret per round, $R_t/t$")
+    ax.set_title(r"Diagnostic for linear worst-gap regret")
+    ax.grid(True, alpha=0.35)
+    ax.legend(frameon=True, fontsize=8)
+    fig.tight_layout()
+    outpath = outdir / "envelope_regret_per_round.png"
+    fig.savefig(outpath, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[plot] {outpath}", flush=True)
+
 # ---------------------------------------------------------------------------
 # Exact-vs-approx validation at T=100k
 # ---------------------------------------------------------------------------
@@ -846,6 +1159,79 @@ python run_pg_bandit_experiments.py plot-history --outdir {args.outdir}
     print(f"[write] {outdir / 'submit_history.sh'}", flush=True)
 
 
+
+
+def write_envelope_slurm_templates(args: argparse.Namespace) -> None:
+    """Write SLURM scripts for the horizon-wise envelope workflow."""
+    outdir = pathlib.Path(args.outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    num_schedules = len(select_schedules(args.schedule_slugs))
+    total_tasks = num_schedules * int(args.num_gaps)
+    array_max = total_tasks - 1
+
+    horizon_arg = f"--horizon-values {args.horizon_values}" if args.horizon_values else f"--num-horizons {args.num_horizons}"
+
+    sweep_script = f"""#!/bin/bash
+#SBATCH --job-name=pg_env_sweep
+#SBATCH --account=YOUR_ACCOUNT_HERE
+#SBATCH --time={args.time}
+#SBATCH --cpus-per-task={args.cpus_per_task}
+#SBATCH --mem={args.mem}
+#SBATCH --array=0-{array_max}%{args.array_parallelism}
+#SBATCH --output=logs/%x_%A_%a.out
+#SBATCH --error=logs/%x_%A_%a.err
+
+set -euo pipefail
+mkdir -p logs {args.outdir}
+module load python scipy-stack || true
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+
+python run_pg_bandit_experiments.py envelope-sweep \\
+  --task-index "${{SLURM_ARRAY_TASK_ID}}" \\
+  --outdir {args.outdir} \\
+  --schedule-slugs {args.schedule_slugs} \\
+  --num-gaps {args.num_gaps} \\
+  --gap-start {args.gap_start} \\
+  --gap-stop {args.gap_stop} \\
+  --horizon {args.horizon} \\
+  {horizon_arg} \\
+  --num-arms {args.num_arms} \\
+  --trajectories {args.trajectories} \\
+  --workers "${{SLURM_CPUS_PER_TASK}}" \\
+  --chunk-trajectories {args.chunk_trajectories or 0} \\
+  --max-mean-change {args.max_mean_change} \\
+  --max-noise-change {args.max_noise_change} \\
+  --block-quantile {args.block_quantile} \\
+  --exact-small-block-threshold {args.exact_small_block_threshold}
+"""
+
+    combine_script = f"""#!/bin/bash
+#SBATCH --job-name=pg_env_plot
+#SBATCH --account=YOUR_ACCOUNT_HERE
+#SBATCH --time=01:00:00
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=4G
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
+
+set -euo pipefail
+mkdir -p logs {args.outdir}
+module load python scipy-stack || true
+
+python run_pg_bandit_experiments.py combine-envelope \\
+  --outdir {args.outdir} \\
+  --plot \\
+  --regret-scale {args.regret_scale}
+"""
+
+    (outdir / "submit_envelope_sweep_array.sh").write_text(sweep_script)
+    (outdir / "submit_envelope_combine_plot.sh").write_text(combine_script)
+    print(f"[write] {outdir / 'submit_envelope_sweep_array.sh'}", flush=True)
+    print(f"[write] {outdir / 'submit_envelope_combine_plot.sh'}", flush=True)
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -905,6 +1291,47 @@ def build_parser() -> argparse.ArgumentParser:
     plot_history_parser.add_argument("--show-bands", action="store_true")
     plot_history_parser.add_argument("--no-baselines", action="store_true")
 
+    envelope_sweep = sub.add_parser(
+        "envelope-sweep",
+        help="Run approximate sweep that records max-Delta candidates at many horizon checkpoints.",
+    )
+    add_common_sim_args(envelope_sweep)
+    envelope_sweep.set_defaults(horizon=10_000_000, trajectories=10_000, outdir="envelope_results")
+    envelope_sweep.add_argument("--task-index", type=int, default=None)
+    envelope_sweep.add_argument("--schedule-index", type=int, default=None)
+    envelope_sweep.add_argument("--gap-index", type=int, default=None)
+    envelope_sweep.add_argument("--run-all", action="store_true")
+    envelope_sweep.add_argument("--schedule-slugs", type=str, default="all")
+    envelope_sweep.add_argument("--gap-start", type=float, default=0.0)
+    envelope_sweep.add_argument("--gap-stop", type=float, default=1.0)
+    envelope_sweep.add_argument("--num-gaps", type=int, default=51)
+    envelope_sweep.add_argument("--num-horizons", type=int, default=21)
+    envelope_sweep.add_argument(
+        "--horizon-values",
+        type=str,
+        default=None,
+        help="Optional comma-separated horizons, e.g. 1000,3000,10000,30000,100000.",
+    )
+
+    combine_envelope_parser = sub.add_parser(
+        "combine-envelope",
+        help="Combine envelope sweep outputs and choose hardest gap separately at each time.",
+    )
+    combine_envelope_parser.add_argument("--outdir", type=str, default="envelope_results")
+    combine_envelope_parser.add_argument("--plot", action="store_true")
+    combine_envelope_parser.add_argument("--regret-scale", type=float, default=1_000_000.0)
+    combine_envelope_parser.add_argument("--show-bands", action="store_true")
+    combine_envelope_parser.add_argument("--no-baselines", action="store_true")
+
+    plot_envelope_parser = sub.add_parser(
+        "plot-envelope",
+        help="Plot existing horizon-wise hardest-gap envelope outputs.",
+    )
+    plot_envelope_parser.add_argument("--outdir", type=str, default="envelope_results")
+    plot_envelope_parser.add_argument("--regret-scale", type=float, default=1_000_000.0)
+    plot_envelope_parser.add_argument("--show-bands", action="store_true")
+    plot_envelope_parser.add_argument("--no-baselines", action="store_true")
+
     validate = sub.add_parser("validate", help="Compare exact and approximate updates at a shorter horizon.")
     add_common_sim_args(validate)
     validate.set_defaults(horizon=100_000, trajectories=1000)
@@ -930,6 +1357,21 @@ def build_parser() -> argparse.ArgumentParser:
     slurm.add_argument("--mem", type=str, default="16G")
     slurm.add_argument("--array-parallelism", type=int, default=100)
 
+    envelope_slurm = sub.add_parser("write-envelope-slurm", help="Write SLURM templates for the horizon-wise envelope workflow.")
+    add_common_sim_args(envelope_slurm)
+    envelope_slurm.set_defaults(horizon=10_000_000, trajectories=10_000, outdir="envelope_results")
+    envelope_slurm.add_argument("--schedule-slugs", type=str, default="all")
+    envelope_slurm.add_argument("--gap-start", type=float, default=0.0)
+    envelope_slurm.add_argument("--gap-stop", type=float, default=1.0)
+    envelope_slurm.add_argument("--num-gaps", type=int, default=51)
+    envelope_slurm.add_argument("--num-horizons", type=int, default=21)
+    envelope_slurm.add_argument("--horizon-values", type=str, default=None)
+    envelope_slurm.add_argument("--regret-scale", type=float, default=1_000_000.0)
+    envelope_slurm.add_argument("--time", type=str, default="08:00:00")
+    envelope_slurm.add_argument("--cpus-per-task", type=int, default=8)
+    envelope_slurm.add_argument("--mem", type=str, default="16G")
+    envelope_slurm.add_argument("--array-parallelism", type=int, default=100)
+
     list_schedules = sub.add_parser("list-schedules", help="Print schedule slugs.")
 
     return parser
@@ -951,10 +1393,18 @@ def main() -> None:
         run_history(args)
     elif args.command == "plot-history":
         plot_history(args)
+    elif args.command == "envelope-sweep":
+        run_envelope_sweep(args)
+    elif args.command == "combine-envelope":
+        combine_envelope(args)
+    elif args.command == "plot-envelope":
+        plot_envelope(args)
     elif args.command == "validate":
         run_validation(args)
     elif args.command == "write-slurm":
         write_slurm_templates(args)
+    elif args.command == "write-envelope-slurm":
+        write_envelope_slurm_templates(args)
     else:
         raise ValueError(f"Unknown command: {args.command}")
 
