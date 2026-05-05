@@ -17,14 +17,14 @@ export OPENBLAS_NUM_THREADS=1
 
 python run_pg_bandit_experiments.py envelope-sweep \
   --task-index "${SLURM_ARRAY_TASK_ID}" \
-  --outdir envelope_results \
+  --outdir envelope_results_1000_arms \
   --schedule-slugs all \
   --num-gaps 51 \
   --gap-start 0.0 \
   --gap-stop 1.0 \
   --horizon 10000000 \
   --num-horizons 21 \
-  --num-arms 40 \
+  --num-arms 1000 \
   --trajectories 10000 \
   --workers "${SLURM_CPUS_PER_TASK}" \
   --chunk-trajectories 0 \
