@@ -12,6 +12,6 @@ mkdir -p logs envelope_results
 module load python scipy-stack || true
 
 python run_pg_bandit_experiments.py combine-envelope \
-  --outdir envelope_results \
+  --outdir envelope_results_1000_arms_100_gaps \
   --plot \
   --regret-scale 1000000.0

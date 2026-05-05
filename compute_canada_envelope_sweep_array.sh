@@ -4,7 +4,7 @@
 #SBATCH --time=01:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
-#SBATCH --array=0-305%100
+#SBATCH --array=0-605%100
 #SBATCH --output=logs/%x_%A_%a.out
 #SBATCH --error=logs/%x_%A_%a.err
 
@@ -17,9 +17,9 @@ export OPENBLAS_NUM_THREADS=1
 
 python run_pg_bandit_experiments.py envelope-sweep \
   --task-index "${SLURM_ARRAY_TASK_ID}" \
-  --outdir envelope_results_1000_arms \
+  --outdir envelope_results_1000_arms_100_gaps \
   --schedule-slugs all \
-  --num-gaps 51 \
+  --num-gaps 101 \
   --gap-start 0.0 \
   --gap-stop 1.0 \
   --horizon 10000000 \
