@@ -23,4 +23,3 @@ GAP_INDEX=$((SLURM_ARRAY_TASK_ID % NUM_GAPS))
 NUM_ARMS=${ARMS_LIST[$ARM_CASE]}
 
 python run_inv_sqrt_tplus1_plots.py sweep-one   --outdir inv_sqrt_tplus1_results   --num-arms "$NUM_ARMS"   --gap-index "$GAP_INDEX"   --num-gaps 51   --gap-start 0.0   --gap-stop 1.0   --horizon 10000000   --num-horizons 21   --trajectories 10000   --workers "$SLURM_CPUS_PER_TASK"   --chunk-trajectories 2500   --method approx   --max-mean-change 0.08   --max-noise-change 0.35   --max-block-size 10000000   --block-quantile 0.995
-
