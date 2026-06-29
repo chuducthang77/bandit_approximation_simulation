@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=inv_sqrt_plot
-#SBATCH --account=def-szepesva
-#SBATCH --time=01:00:00
+#SBATCH --account=YOUR_ACCOUNT_HERE
+#SBATCH --time=02:00:00
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
 #SBATCH --output=logs/%x_%j.out

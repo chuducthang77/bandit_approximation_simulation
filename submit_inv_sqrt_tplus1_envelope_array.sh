@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=inv_sqrt_env
-#SBATCH --account=def-szepesva
-#SBATCH --time=01:00:00
+#SBATCH --account=YOUR_ACCOUNT_HERE
+#SBATCH --time=08:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --array=0-101%100
