@@ -21,19 +21,19 @@ python run_inv_sqrt_tplus1_plots.py combine-plot \
   --outdir inv_sqrt_tplus1_results \
   --num-arms 1000 \
   --num-arms-list 1000,3 \
-  --horizon 10000000 \
+  --horizon 1000000000 \
   --regret-scale 1000000.0 \
   --c-values 0.5,1,2,4 \
   --make-sample-path \
   --sample-paths 40 \
-  --sample-checkpoints 250 \
+  --sample-checkpoints 350 \
   --make-benchmark \
   --benchmark-trajectories 10000 \
-  --benchmark-checkpoints 250 \
+  --benchmark-checkpoints 350 \
   --workers "${SLURM_CPUS_PER_TASK}" \
   --chunk-trajectories 2500 \
   --method approx \
   --max-mean-change 0.08 \
   --max-noise-change 0.35 \
-  --max-block-size 10000000 \
+  --max-block-size 50000000 \
   --block-quantile 0.995

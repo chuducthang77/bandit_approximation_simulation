@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=inv_sqrt_env
 #SBATCH --account=def-szepesva
-#SBATCH --time=01:00:00
+#SBATCH --time=03:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=24G
 #SBATCH --array=0-201%100
@@ -18,10 +18,11 @@ export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
-# K = 1000 is the main large-m experiment.
-# K = 3 is the few-arm comparison.
-# NUM_GAPS = 101 means Delta = 0.00, 0.01, ..., 1.00.
-# Total array tasks = 2 * 101 = 202, indexed 0,...,201.
+# Two arm settings:
+#   K = 1000: main experiment
+#   K = 3:    few-arm comparison
+# 101 gaps means Delta = 0.00, 0.01, ..., 1.00
+# Total tasks = 2 * 101 = 202
 ARMS_LIST=(1000 3)
 NUM_GAPS=101
 
@@ -35,7 +36,7 @@ fi
 
 NUM_ARMS=${ARMS_LIST[$ARM_CASE]}
 
-echo "Running eta_t = 1/sqrt(t+1), K=${NUM_ARMS}, gap index ${GAP_INDEX}/${NUM_GAPS}"
+echo "Running eta_t = 1/sqrt(t+1), K=${NUM_ARMS}, gap index ${GAP_INDEX}/${NUM_GAPS}, horizon=1e9"
 
 python run_inv_sqrt_tplus1_plots.py sweep-one \
   --outdir inv_sqrt_tplus1_results \
@@ -44,13 +45,13 @@ python run_inv_sqrt_tplus1_plots.py sweep-one \
   --num-gaps "${NUM_GAPS}" \
   --gap-start 0.0 \
   --gap-stop 1.0 \
-  --horizon 10000000 \
-  --num-horizons 21 \
+  --horizon 1000000000 \
+  --num-horizons 31 \
   --trajectories 10000 \
   --workers "${SLURM_CPUS_PER_TASK}" \
   --chunk-trajectories 2500 \
   --method approx \
   --max-mean-change 0.08 \
   --max-noise-change 0.35 \
-  --max-block-size 10000000 \
+  --max-block-size 50000000 \
   --block-quantile 0.995
