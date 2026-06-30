@@ -8,19 +8,30 @@
 #SBATCH --error=logs/%x_%j.err
 
 set -euo pipefail
+
 mkdir -p logs inv_sqrt_tplus1_results
 module load python scipy-stack || true
+
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
 
 python run_inv_sqrt_tplus1_plots.py combine-plot \
   --outdir inv_sqrt_tplus1_results \
   --num-arms 1000 \
-  --num-arms-list 1000,10 \
+  --num-arms-list 1000,3 \
   --horizon 10000000 \
   --regret-scale 1000000.0 \
   --c-values 0.5,1,2,4 \
   --make-sample-path \
   --sample-paths 40 \
   --sample-checkpoints 250 \
+  --make-benchmark \
+  --benchmark-trajectories 10000 \
+  --benchmark-checkpoints 250 \
+  --workers "${SLURM_CPUS_PER_TASK}" \
+  --chunk-trajectories 2500 \
   --method approx \
   --max-mean-change 0.08 \
   --max-noise-change 0.35 \

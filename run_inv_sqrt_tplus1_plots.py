@@ -2,43 +2,23 @@
 """
 Experiments for the lower-bound policy-gradient bandit with
 
-    eta_t = 1 / sqrt(t + 1).
+    eta_t = 1 / sqrt(t + 1)
+
+and a fixed-gap benchmark against
+
+    eta = Delta^2.
 
 Bandit instance for a given gap Delta:
 
     mu    = (1, 1 - Delta, 0, ..., 0)
     sigma = (1, 1,         0, ..., 0)
 
-The number of zero-mean arms is
+Default experiment:
 
-    m = K - 2.
-
-This version is hard-coded by default for:
-
-    main K:       1000
-    comparison K: 10
+    main K:       1000  -> m = 998 zero-mean arms
+    comparison K: 3     -> m = 1 zero-mean arm
     gap grid:     101 values in [0, 1]
-
-Commands:
-
-    sweep-one
-        Run one gap value for one arm count. Use this in the SLURM array.
-
-    sweep-all
-        Run all gaps locally. Useful for small tests.
-
-    combine-plot
-        Combine all sweep outputs and create:
-            worst_gap_vs_predicted_gap.png
-            sample_path_pi1_arms_1000.png
-            sample_path_pi1_arms_10.png
-            worst_case_regret_original_scale.png
-            worst_case_regret_loglog.png
-            few_arms_comparison_original_scale.png
-            few_arms_comparison_loglog.png
-
-    sample-path
-        Create one sample-path plot for a given K and gap.
+    horizon:      10,000,000
 """
 
 from __future__ import annotations
@@ -58,21 +38,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-# =============================================================================
-# Defaults: these are the important values.
-# =============================================================================
-
 DEFAULT_OUTDIR = "inv_sqrt_tplus1_results"
-
-# Main experiment: K = 1000, so m = 998 zero-mean arms.
 DEFAULT_MAIN_NUM_ARMS = 1000
-
-# We also run K = 10, so m = 8 zero-mean arms.
-DEFAULT_NUM_ARMS_LIST = "1000,10"
-
-# 101 gaps means Delta = 0.00, 0.01, ..., 1.00.
+DEFAULT_NUM_ARMS_LIST = "1000,3"
 DEFAULT_NUM_GAPS = 101
-
 DEFAULT_HORIZON = 10_000_000
 DEFAULT_NUM_HORIZONS = 21
 DEFAULT_TRAJECTORIES = 10_000
@@ -80,10 +49,6 @@ DEFAULT_WORKERS = 1
 DEFAULT_CHUNK_TRAJECTORIES = 2_500
 DEFAULT_SEED = 20260310
 
-
-# =============================================================================
-# Utility functions
-# =============================================================================
 
 def parse_int_list(text: str) -> List[int]:
     return [int(x.strip()) for x in text.split(",") if x.strip()]
@@ -122,21 +87,19 @@ def make_log_checkpoints(horizon: int, num_horizons: int) -> np.ndarray:
     return raw.astype(np.int64)
 
 
-def eta_inv_sqrt_tplus1(step_index_zero_based: int | np.ndarray) -> float | np.ndarray:
-    """
-    eta_t = 1 / sqrt(t + 1), with t zero-based.
+def eta_value(schedule: str, step_index_zero_based, gap_arm2: float) -> np.ndarray:
+    t = np.asarray(step_index_zero_based, dtype=np.float64)
 
-    So at the first update, t = 0 and eta_0 = 1.
-    """
-    return 1.0 / np.sqrt(np.asarray(step_index_zero_based, dtype=np.float64) + 1.0)
+    if schedule == "inv_sqrt_tplus1":
+        return 1.0 / np.sqrt(t + 1.0)
+
+    if schedule == "constant_delta_squared":
+        return np.full_like(t, float(gap_arm2) ** 2, dtype=np.float64)
+
+    raise ValueError(f"Unknown stepsize schedule: {schedule}")
 
 
 def harmonic_number(n: int) -> float:
-    """
-    Fast approximation to H_n = sum_{j=1}^n 1/j.
-
-    Used for sum eta_t^2 because eta_t^2 = 1/(t+1).
-    """
     n = int(n)
     if n <= 0:
         return 0.0
@@ -149,33 +112,34 @@ def harmonic_number(n: int) -> float:
     return math.log(x) + gamma + 1.0 / (2.0 * x) - 1.0 / (12.0 * x * x)
 
 
-def eta_sums_for_block(start_step: int, block_size: int) -> Tuple[float, float]:
-    """
-    Return
-
-        sum eta_t
-        sum eta_t^2
-
-    over t = start_step, ..., start_step + block_size - 1.
-    """
+def eta_sums_for_block(
+    schedule: str,
+    start_step: int,
+    block_size: int,
+    gap_arm2: float,
+) -> Tuple[float, float]:
     start_step = int(start_step)
     block_size = int(block_size)
 
     if block_size <= 0:
         return 0.0, 0.0
 
+    if schedule == "constant_delta_squared":
+        eta = float(gap_arm2) ** 2
+        return float(block_size * eta), float(block_size * eta * eta)
+
+    if schedule != "inv_sqrt_tplus1":
+        raise ValueError(f"Unknown stepsize schedule: {schedule}")
+
     if block_size <= 200_000:
         t = np.arange(start_step, start_step + block_size, dtype=np.float64)
         eta = 1.0 / np.sqrt(t + 1.0)
         return float(np.sum(eta)), float(np.sum(eta * eta))
 
-    # Integral approximation for sum 1/sqrt(t+1).
     sum_eta = 2.0 * (
         math.sqrt(start_step + block_size + 1.0) - math.sqrt(start_step + 1.0)
     )
 
-    # Exact identity:
-    #   sum_{t=a}^{a+B-1} 1/(t+1) = H_{a+B} - H_a.
     sum_eta_squared = harmonic_number(start_step + block_size) - harmonic_number(start_step)
 
     return float(sum_eta), float(sum_eta_squared)
@@ -183,7 +147,6 @@ def eta_sums_for_block(start_step: int, block_size: int) -> Tuple[float, float]:
 
 def write_rows_csv(path: Path, rows: Sequence[Dict[str, object]]) -> None:
     ensure_dir(path.parent)
-
     if not rows:
         raise ValueError(f"No rows to write to {path}")
 
@@ -204,9 +167,14 @@ def read_rows_csv(path: Path) -> List[Dict[str, str]]:
         return list(csv.DictReader(f))
 
 
-# =============================================================================
-# Policy and update rule
-# =============================================================================
+def style_axis(ax, *, log_grid: bool = False) -> None:
+    # Less dense grid: major grid lines only.
+    if log_grid:
+        ax.grid(True, which="major", alpha=0.28, linewidth=0.8)
+        ax.grid(False, which="minor")
+    else:
+        ax.grid(True, which="major", alpha=0.28, linewidth=0.8)
+
 
 def stable_policy_probabilities(
     optimal_arm_score: np.ndarray,
@@ -214,13 +182,6 @@ def stable_policy_probabilities(
     other_arm_score: np.ndarray,
     num_other_arms: int,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Softmax probabilities for:
-
-        arm 1
-        arm 2
-        each zero-mean arm
-    """
     max_score = np.maximum(np.maximum(optimal_arm_score, second_arm_score), other_arm_score)
 
     weight_optimal = np.exp(optimal_arm_score - max_score)
@@ -243,19 +204,13 @@ def instantaneous_expected_regret(
     gap_arm2: float,
     num_other_arms: int,
 ) -> np.ndarray:
-    """
-    Conditional expected regret under the current policy.
-
-    Arm 1 gap: 0
-    Arm 2 gap: Delta
-    Arms 3,...,K gap: 1
-    """
     other_total_prob = num_other_arms * other_prob_per_arm
     return other_total_prob + float(gap_arm2) * second_prob
 
 
 def choose_block_size(
     *,
+    schedule: str,
     current_step: int,
     remaining_steps: int,
     gap_arm2: float,
@@ -268,13 +223,11 @@ def choose_block_size(
     max_block_size: int,
     block_quantile: float,
 ) -> int:
-    """
-    Adaptive block size for the frozen-policy approximation.
+    eta_now = float(eta_value(schedule, current_step, gap_arm2))
 
-    Smaller max_mean_change and max_noise_change make the approximation stricter
-    but slower.
-    """
-    eta_now = float(eta_inv_sqrt_tplus1(current_step))
+    if eta_now <= 0.0:
+        return int(min(remaining_steps, max_block_size))
+
     gap = float(gap_arm2)
 
     inst_regret = instantaneous_expected_regret(
@@ -382,6 +335,7 @@ def record_checkpoint(
 
 def run_exact_steps(
     *,
+    schedule: str,
     num_steps: int,
     current_step: int,
     random_generator: np.random.Generator,
@@ -392,16 +346,13 @@ def run_exact_steps(
     other_arm_score: np.ndarray,
     regret_by_trajectory: np.ndarray,
 ) -> None:
-    """
-    Literal round-by-round Algorithm-1 update for a small number of steps.
-    """
     n = optimal_arm_score.size
     gap = float(gap_arm2)
     second_mean = 1.0 - gap
 
     for local_step in range(int(num_steps)):
         step = current_step + local_step
-        eta = float(eta_inv_sqrt_tplus1(step))
+        eta = float(eta_value(schedule, step, gap))
 
         p1, p2, po = stable_policy_probabilities(
             optimal_arm_score, second_arm_score, other_arm_score, num_other_arms
@@ -410,8 +361,10 @@ def run_exact_steps(
         other_total = num_other_arms * po
         regret_by_trajectory += other_total + gap * p2
 
-        u = random_generator.random(n)
+        if eta <= 0.0:
+            continue
 
+        u = random_generator.random(n)
         choose_arm1 = u < p1
         choose_arm2 = (u >= p1) & (u < p1 + p2)
 
@@ -428,13 +381,12 @@ def run_exact_steps(
 
         optimal_arm_score += eta * reward * (choose_arm1.astype(np.float64) - p1)
         second_arm_score += eta * reward * (choose_arm2.astype(np.float64) - p2)
-
-        # Each zero-mean arm has the same score, so we store one representative.
         other_arm_score += eta * reward * (-po)
 
 
 def run_gaussian_approx_block(
     *,
+    schedule: str,
     block_size: int,
     current_step: int,
     random_generator: np.random.Generator,
@@ -445,16 +397,6 @@ def run_gaussian_approx_block(
     other_arm_score: np.ndarray,
     regret_by_trajectory: np.ndarray,
 ) -> None:
-    """
-    Blocked Gaussian approximation with frozen policy inside the block.
-
-    It samples the weighted reward sums
-
-        S1 = sum eta_t Y_t 1{A_t = 1}
-        S2 = sum eta_t Y_t 1{A_t = 2}
-
-    by matching their Gaussian mean and covariance.
-    """
     gap = float(gap_arm2)
     second_mean = 1.0 - gap
 
@@ -466,7 +408,10 @@ def run_gaussian_approx_block(
     inst_regret = other_total + gap * p2
     regret_by_trajectory += int(block_size) * inst_regret
 
-    sum_eta, sum_eta_squared = eta_sums_for_block(current_step, block_size)
+    sum_eta, sum_eta_squared = eta_sums_for_block(schedule, current_step, block_size, gap)
+
+    if sum_eta == 0.0 and sum_eta_squared == 0.0:
+        return
 
     mu1 = 1.0
     mu2 = second_mean
@@ -513,6 +458,7 @@ def simulate_bandit_history(
     checkpoints: Sequence[int],
     num_trajectories: int,
     seed: int,
+    schedule: str = "inv_sqrt_tplus1",
     method: str = "approx",
     max_mean_change: float = 0.08,
     max_noise_change: float = 0.35,
@@ -526,6 +472,9 @@ def simulate_bandit_history(
 
     if method not in {"exact", "approx"}:
         raise ValueError("method must be either 'exact' or 'approx'")
+
+    if schedule not in {"inv_sqrt_tplus1", "constant_delta_squared"}:
+        raise ValueError("schedule must be 'inv_sqrt_tplus1' or 'constant_delta_squared'")
 
     checkpoints_array = np.array(
         sorted(set(int(x) for x in checkpoints if 1 <= int(x) <= int(horizon))),
@@ -583,18 +532,15 @@ def simulate_bandit_history(
                 other_mass_sum=other_mass_sum,
                 pi1_paths=pi1_paths,
             )
-
             record_index += 1
-
             if record_index >= num_records:
                 break
-
             continue
 
         if method == "exact":
             block_size = min(remaining_to_horizon, remaining_to_checkpoint, 1000)
-
             run_exact_steps(
+                schedule=schedule,
                 num_steps=block_size,
                 current_step=current_step,
                 random_generator=random_generator,
@@ -605,7 +551,6 @@ def simulate_bandit_history(
                 other_arm_score=other_arm_score,
                 regret_by_trajectory=regret_by_trajectory,
             )
-
         else:
             p1, p2, po = stable_policy_probabilities(
                 optimal_arm_score,
@@ -615,6 +560,7 @@ def simulate_bandit_history(
             )
 
             block_size = choose_block_size(
+                schedule=schedule,
                 current_step=current_step,
                 remaining_steps=remaining_to_horizon,
                 gap_arm2=gap_arm2,
@@ -632,6 +578,7 @@ def simulate_bandit_history(
 
             if block_size <= int(exact_small_block_threshold):
                 run_exact_steps(
+                    schedule=schedule,
                     num_steps=block_size,
                     current_step=current_step,
                     random_generator=random_generator,
@@ -644,6 +591,7 @@ def simulate_bandit_history(
                 )
             else:
                 run_gaussian_approx_block(
+                    schedule=schedule,
                     block_size=block_size,
                     current_step=current_step,
                     random_generator=random_generator,
@@ -672,9 +620,7 @@ def simulate_bandit_history(
                 other_mass_sum=other_mass_sum,
                 pi1_paths=pi1_paths,
             )
-
             record_index += 1
-
             if record_index >= num_records:
                 break
 
@@ -690,10 +636,6 @@ def simulate_bandit_history(
     )
 
 
-# =============================================================================
-# Parallel simulation
-# =============================================================================
-
 def _simulate_chunk_worker(kwargs: Dict[str, object]) -> SimulationResult:
     return simulate_bandit_history(**kwargs)
 
@@ -708,6 +650,7 @@ def simulate_parallel(
     workers: int,
     chunk_trajectories: int,
     seed: int,
+    schedule: str,
     method: str,
     max_mean_change: float,
     max_noise_change: float,
@@ -721,7 +664,6 @@ def simulate_parallel(
 
     chunks: List[int] = []
     remaining = trajectories
-
     while remaining > 0:
         size = min(chunk_trajectories, remaining)
         chunks.append(size)
@@ -732,6 +674,7 @@ def simulate_parallel(
         num_arms=int(num_arms),
         horizon=int(horizon),
         checkpoints=list(int(x) for x in checkpoints),
+        schedule=str(schedule),
         method=str(method),
         max_mean_change=float(max_mean_change),
         max_noise_change=float(max_noise_change),
@@ -743,42 +686,33 @@ def simulate_parallel(
 
     if workers == 1 or len(chunks) == 1:
         results = []
-
         for chunk_index, chunk_size in enumerate(chunks):
             kwargs = dict(common)
             kwargs.update(
                 num_trajectories=chunk_size,
                 seed=int(seed) + 10_003 * chunk_index,
             )
-
             results.append(simulate_bandit_history(**kwargs))
-
     else:
         results = []
-
         with ProcessPoolExecutor(max_workers=workers) as executor:
             futures = []
-
             for chunk_index, chunk_size in enumerate(chunks):
                 kwargs = dict(common)
                 kwargs.update(
                     num_trajectories=chunk_size,
                     seed=int(seed) + 10_003 * chunk_index,
                 )
-
                 futures.append(executor.submit(_simulate_chunk_worker, kwargs))
-
             for future in as_completed(futures):
                 results.append(future.result())
 
     checkpoints_array = results[0].checkpoints
-
     regret_sum = np.sum([r.regret_sum for r in results], axis=0)
     regret_sumsq = np.sum([r.regret_sumsq for r in results], axis=0)
     pi1_sum = np.sum([r.pi1_sum for r in results], axis=0)
     pi2_sum = np.sum([r.pi2_sum for r in results], axis=0)
     other_mass_sum = np.sum([r.other_mass_sum for r in results], axis=0)
-
     total_trajectories = int(sum(r.num_trajectories for r in results))
 
     return SimulationResult(
@@ -800,13 +734,13 @@ def result_to_rows(
     gap_arm2: float,
     num_arms: int,
     method: str,
+    schedule: str,
 ) -> List[Dict[str, object]]:
     n = result.num_trajectories
     rows: List[Dict[str, object]] = []
 
     for i, time_value in enumerate(result.checkpoints):
         mean_regret = result.regret_sum[i] / n
-
         if n > 1:
             variance = max(result.regret_sumsq[i] / n - mean_regret ** 2, 0.0)
             standard_error = math.sqrt(variance / n)
@@ -827,7 +761,7 @@ def result_to_rows(
                 "mean_other_mass": float(result.other_mass_sum[i] / n),
                 "num_trajectories": int(n),
                 "method": str(method),
-                "stepsize": "eta_t=1/sqrt(t+1)",
+                "schedule": str(schedule),
             }
         )
 
@@ -840,15 +774,13 @@ def sweep_output_path(outdir: Path, num_arms: int, gap_index: int) -> Path:
 
 def run_sweep_one(args: argparse.Namespace) -> Path:
     outdir = Path(args.outdir)
-
     gaps = make_gap_grid(args.num_gaps, args.gap_start, args.gap_stop)
 
     if args.gap_index < 0 or args.gap_index >= len(gaps):
-        raise ValueError(f"gap-index {args.gap_index} is outside 0,...,{len(gaps)-1}")
+        raise ValueError(f"gap-index {args.gap_index} is outside 0,...,{len(gaps) - 1}")
 
     gap = float(gaps[int(args.gap_index)])
     checkpoints = make_log_checkpoints(args.horizon, args.num_horizons)
-
     seed = int(args.seed) + 1_000_003 * int(args.num_arms) + 101 * int(args.gap_index)
 
     result = simulate_parallel(
@@ -860,6 +792,7 @@ def run_sweep_one(args: argparse.Namespace) -> Path:
         workers=args.workers,
         chunk_trajectories=args.chunk_trajectories,
         seed=seed,
+        schedule="inv_sqrt_tplus1",
         method=args.method,
         max_mean_change=args.max_mean_change,
         max_noise_change=args.max_noise_change,
@@ -874,30 +807,24 @@ def run_sweep_one(args: argparse.Namespace) -> Path:
         gap_arm2=gap,
         num_arms=args.num_arms,
         method=args.method,
+        schedule="inv_sqrt_tplus1",
     )
 
     path = sweep_output_path(outdir, args.num_arms, args.gap_index)
     write_rows_csv(path, rows)
-
     print(f"Wrote {path}")
     return path
 
 
 def run_sweep_all(args: argparse.Namespace) -> None:
     arms_list = parse_int_list(args.num_arms_list)
-
     for num_arms in arms_list:
         for gap_index in range(int(args.num_gaps)):
             one_args = argparse.Namespace(**vars(args))
             one_args.num_arms = int(num_arms)
             one_args.gap_index = int(gap_index)
-
             run_sweep_one(one_args)
 
-
-# =============================================================================
-# Combining and plotting
-# =============================================================================
 
 def combine_envelope_for_num_arms(
     outdir: Path,
@@ -910,44 +837,36 @@ def combine_envelope_for_num_arms(
         raise FileNotFoundError(f"No sweep files found in {sweep_dir}")
 
     all_rows: List[Dict[str, object]] = []
-
     for path in files:
         for row in read_rows_csv(path):
             if int(float(row["num_arms"])) != int(num_arms):
                 continue
-
-            converted: Dict[str, object] = {
-                "num_arms": int(float(row["num_arms"])),
-                "zero_mean_arms_m": int(float(row["zero_mean_arms_m"])),
-                "gap_index": int(float(row["gap_index"])),
-                "gap_arm2": float(row["gap_arm2"]),
-                "time": int(float(row["time"])),
-                "mean_regret": float(row["mean_regret"]),
-                "standard_error": float(row["standard_error"]),
-                "mean_pi1": float(row["mean_pi1"]),
-                "mean_pi2": float(row.get("mean_pi2", 0.0)),
-                "mean_other_mass": float(row.get("mean_other_mass", 0.0)),
-                "num_trajectories": int(float(row["num_trajectories"])),
-                "method": row.get("method", "approx"),
-                "stepsize": row.get("stepsize", "eta_t=1/sqrt(t+1)"),
-            }
-
-            all_rows.append(converted)
-
-    if not all_rows:
-        raise RuntimeError(f"No usable rows found for K={num_arms}")
+            all_rows.append(
+                {
+                    "num_arms": int(float(row["num_arms"])),
+                    "zero_mean_arms_m": int(float(row["zero_mean_arms_m"])),
+                    "gap_index": int(float(row["gap_index"])),
+                    "gap_arm2": float(row["gap_arm2"]),
+                    "time": int(float(row["time"])),
+                    "mean_regret": float(row["mean_regret"]),
+                    "standard_error": float(row["standard_error"]),
+                    "mean_pi1": float(row["mean_pi1"]),
+                    "mean_pi2": float(row.get("mean_pi2", 0.0)),
+                    "mean_other_mass": float(row.get("mean_other_mass", 0.0)),
+                    "num_trajectories": int(float(row["num_trajectories"])),
+                    "method": row.get("method", "approx"),
+                    "schedule": row.get("schedule", "inv_sqrt_tplus1"),
+                }
+            )
 
     by_time: Dict[int, List[Dict[str, object]]] = {}
-
     for row in all_rows:
         by_time.setdefault(int(row["time"]), []).append(row)
 
     hardest_rows: List[Dict[str, object]] = []
-
     for time_value in sorted(by_time.keys()):
         candidates = by_time[time_value]
         best = max(candidates, key=lambda r: float(r["mean_regret"]))
-
         hardest_rows.append(
             {
                 "num_arms": int(num_arms),
@@ -962,23 +881,19 @@ def combine_envelope_for_num_arms(
                 "mean_other_mass": float(best["mean_other_mass"]),
                 "num_trajectories": int(best["num_trajectories"]),
                 "method": best["method"],
-                "stepsize": best["stepsize"],
+                "schedule": best["schedule"],
             }
         )
 
     return all_rows, hardest_rows
 
 
-def rows_to_arrays(
-    rows: Sequence[Dict[str, object]],
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def rows_to_arrays(rows: Sequence[Dict[str, object]]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     time = np.array([float(r["time"]) for r in rows], dtype=np.float64)
     regret = np.array([float(r["mean_regret"]) for r in rows], dtype=np.float64)
     se = np.array([float(r["standard_error"]) for r in rows], dtype=np.float64)
     gap = np.array([float(r["hardest_gap_arm2"]) for r in rows], dtype=np.float64)
-
     order = np.argsort(time)
-
     return time[order], regret[order], se[order], gap[order]
 
 
@@ -988,40 +903,27 @@ def plot_worst_case_regret_main(
     regret_scale: float,
 ) -> List[Path]:
     time, regret, se, _gap = rows_to_arrays(hardest_rows)
-
     num_arms = int(hardest_rows[0]["num_arms"])
     scale = float(regret_scale)
-
-    ylabel = (
-        "Worst-case average regret"
-        if scale == 1.0
-        else rf"Worst-case average regret / ${scale:.0e}$"
-    )
+    ylabel = "Worst-case average regret" if scale == 1.0 else rf"Worst-case average regret / ${scale:.0e}$"
 
     paths: List[Path] = []
 
     fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=180)
     ax.plot(time, regret / scale, linewidth=2.5, label=rf"$K={num_arms}$")
-    ax.fill_between(
-        time,
-        (regret - 2.0 * se) / scale,
-        (regret + 2.0 * se) / scale,
-        alpha=0.18,
-    )
+    ax.fill_between(time, (regret - 2.0 * se) / scale, (regret + 2.0 * se) / scale, alpha=0.18)
     ax.set_xlabel("Horizon")
     ax.set_ylabel(ylabel)
     ax.set_title(r"Horizon-wise worst-case regret, $\eta_t = 1/\sqrt{t+1}$")
-    ax.grid(True, alpha=0.3)
+    style_axis(ax)
     ax.legend()
     fig.tight_layout()
-
     path = outdir / "worst_case_regret_original_scale.png"
     fig.savefig(path)
     plt.close(fig)
     paths.append(path)
 
     positive = (time > 0) & (regret > 0)
-
     fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=180)
     ax.plot(time[positive], regret[positive] / scale, linewidth=2.5, label=rf"$K={num_arms}$")
     ax.set_xscale("log")
@@ -1029,10 +931,9 @@ def plot_worst_case_regret_main(
     ax.set_xlabel("Horizon")
     ax.set_ylabel(ylabel)
     ax.set_title("Horizon-wise worst-case regret, log-log scale")
-    ax.grid(True, which="both", alpha=0.3)
+    style_axis(ax, log_grid=True)
     ax.legend()
     fig.tight_layout()
-
     path = outdir / "worst_case_regret_loglog.png"
     fig.savefig(path)
     plt.close(fig)
@@ -1045,9 +946,8 @@ def plot_worst_gap_vs_prediction(
     hardest_rows: Sequence[Dict[str, object]],
     outdir: Path,
     c_values: Sequence[float],
-) -> Path:
+) -> List[Path]:
     time, _regret, _se, gap = rows_to_arrays(hardest_rows)
-
     num_arms = int(hardest_rows[0]["num_arms"])
     m = int(num_arms) - 2
 
@@ -1056,40 +956,45 @@ def plot_worst_gap_vs_prediction(
 
     m_term = math.sqrt(math.log(max(m, 2)) / float(m))
     n_term = 1.0 / np.log(np.maximum(time, 3.0))
+    base_prediction = np.minimum(m_term, n_term)
+
+    paths: List[Path] = []
 
     fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=180)
-
-    ax.plot(time, gap, marker="o", linewidth=2.5, label="empirical hardest gap")
+    ax.plot(time, gap, marker="o", markersize=4, linewidth=2.5, label="empirical hardest gap")
 
     for c in c_values:
-        predicted = float(c) * np.minimum(m_term, n_term)
-        predicted = np.minimum(predicted, 1.0)
-
-        ax.plot(
-            time,
-            predicted,
-            linestyle="--",
-            linewidth=1.8,
-            label=rf"$c={c:g}$ prediction",
-        )
+        predicted = np.minimum(float(c) * base_prediction, 1.0)
+        ax.plot(time, predicted, linestyle="--", linewidth=1.8, label=rf"$c={c:g}$ prediction")
 
     ax.set_xscale("log")
     ax.set_ylim(-0.02, 1.02)
     ax.set_xlabel("Horizon $n$")
     ax.set_ylabel(r"Gap $\Delta$")
-    ax.set_title(
-        rf"Hardest gap vs. $c\min\{{\sqrt{{\log m/m}},1/\log n\}}$, "
-        rf"$K={num_arms}$, $m={m}$"
-    )
-    ax.grid(True, which="both", alpha=0.3)
+    ax.set_title(rf"Hardest gap vs. $c\min\{{\sqrt{{\log m/m}},1/\log n\}}$, $K={num_arms}$, $m={m}$")
+    style_axis(ax, log_grid=True)
     ax.legend(fontsize=8)
     fig.tight_layout()
-
     path = outdir / "worst_gap_vs_predicted_gap.png"
     fig.savefig(path)
     plt.close(fig)
+    paths.append(path)
 
-    return path
+    ratio = gap / np.maximum(base_prediction, 1e-12)
+    fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=180)
+    ax.plot(time, ratio, marker="o", markersize=4, linewidth=2.5)
+    ax.set_xscale("log")
+    ax.set_xlabel("Horizon $n$")
+    ax.set_ylabel(r"$\Delta_n^\star / \min\{\sqrt{\log m/m},1/\log n\}$")
+    ax.set_title(rf"Hardest-gap scale ratio, $K={num_arms}$, $m={m}$")
+    style_axis(ax, log_grid=True)
+    fig.tight_layout()
+    path = outdir / "worst_gap_prediction_ratio.png"
+    fig.savefig(path)
+    plt.close(fig)
+    paths.append(path)
+
+    return paths
 
 
 def plot_few_arms_comparison(
@@ -1098,60 +1003,37 @@ def plot_few_arms_comparison(
     regret_scale: float,
 ) -> List[Path]:
     scale = float(regret_scale)
-
-    ylabel = (
-        "Worst-case average regret"
-        if scale == 1.0
-        else rf"Worst-case average regret / ${scale:.0e}$"
-    )
-
+    ylabel = "Worst-case average regret" if scale == 1.0 else rf"Worst-case average regret / ${scale:.0e}$"
     paths: List[Path] = []
 
     fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=180)
-
     for num_arms, rows in sorted(hardest_by_arms.items(), reverse=True):
         time, regret, _se, _gap = rows_to_arrays(rows)
-        ax.plot(
-            time,
-            regret / scale,
-            linewidth=2.5,
-            label=rf"$K={num_arms}$, $m={num_arms - 2}$",
-        )
-
+        ax.plot(time, regret / scale, linewidth=2.5, label=rf"$K={num_arms}$, $m={num_arms - 2}$")
     ax.set_xlabel("Horizon")
     ax.set_ylabel(ylabel)
-    ax.set_title("Few-arm comparison: large m is harder")
-    ax.grid(True, alpha=0.3)
+    ax.set_title("Few-arm comparison: large $m$ is harder")
+    style_axis(ax)
     ax.legend()
     fig.tight_layout()
-
     path = outdir / "few_arms_comparison_original_scale.png"
     fig.savefig(path)
     plt.close(fig)
     paths.append(path)
 
     fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=180)
-
     for num_arms, rows in sorted(hardest_by_arms.items(), reverse=True):
         time, regret, _se, _gap = rows_to_arrays(rows)
         positive = (time > 0) & (regret > 0)
-
-        ax.plot(
-            time[positive],
-            regret[positive] / scale,
-            linewidth=2.5,
-            label=rf"$K={num_arms}$, $m={num_arms - 2}$",
-        )
-
+        ax.plot(time[positive], regret[positive] / scale, linewidth=2.5, label=rf"$K={num_arms}$, $m={num_arms - 2}$")
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlabel("Horizon")
     ax.set_ylabel(ylabel)
     ax.set_title("Few-arm comparison, log-log scale")
-    ax.grid(True, which="both", alpha=0.3)
+    style_axis(ax, log_grid=True)
     ax.legend()
     fig.tight_layout()
-
     path = outdir / "few_arms_comparison_loglog.png"
     fig.savefig(path)
     plt.close(fig)
@@ -1185,6 +1067,7 @@ def plot_sample_paths(
         checkpoints=checkpoints,
         num_trajectories=int(num_paths),
         seed=int(seed),
+        schedule="inv_sqrt_tplus1",
         method=str(method),
         max_mean_change=float(max_mean_change),
         max_noise_change=float(max_noise_change),
@@ -1197,33 +1080,190 @@ def plot_sample_paths(
     assert result.pi1_paths is not None
 
     t = result.checkpoints.astype(np.float64)
-    paths = np.clip(result.pi1_paths, 1e-12, 1.0 - 1e-12)
-    mean_path = np.mean(paths, axis=1)
+    paths_array = np.clip(result.pi1_paths, 1e-12, 1.0 - 1e-12)
+    mean_path = np.mean(paths_array, axis=1)
 
     fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=180)
-
-    for j in range(paths.shape[1]):
-        ax.plot(t, paths[:, j], color="0.65", alpha=0.45, linewidth=0.9)
-
+    for j in range(paths_array.shape[1]):
+        ax.plot(t, paths_array[:, j], color="0.65", alpha=0.45, linewidth=0.9)
     ax.plot(t, mean_path, color="red", linewidth=2.8, label="average")
-
     ax.set_xscale("log")
     ax.set_yscale("logit")
     ax.set_ylim(1.0 / (10.0 * num_arms), 1.0 - 1e-4)
     ax.set_xlabel("Time")
     ax.set_ylabel(r"$\pi_t(1)$")
-    ax.set_title(
-        rf"Sample paths of $\pi_t(1)$, $K={num_arms}$, hardest $\Delta={gap_arm2:.4g}$"
-    )
-    ax.grid(True, which="both", alpha=0.3)
+    ax.set_title(rf"Sample paths of $\pi_t(1)$, $K={num_arms}$, hardest $\Delta={gap_arm2:.4g}$")
+    style_axis(ax, log_grid=True)
     ax.legend()
     fig.tight_layout()
-
     path = outdir / f"sample_path_pi1_arms_{int(num_arms)}.png"
     fig.savefig(path)
     plt.close(fig)
-
     return path
+
+
+def benchmark_rows_from_result(
+    *,
+    result: SimulationResult,
+    gap_arm2: float,
+    num_arms: int,
+    schedule: str,
+    method: str,
+) -> List[Dict[str, object]]:
+    rows: List[Dict[str, object]] = []
+    n = result.num_trajectories
+    for i, time_value in enumerate(result.checkpoints):
+        mean_regret = result.regret_sum[i] / n
+        if n > 1:
+            variance = max(result.regret_sumsq[i] / n - mean_regret ** 2, 0.0)
+            standard_error = math.sqrt(variance / n)
+        else:
+            standard_error = 0.0
+        rows.append(
+            {
+                "schedule": schedule,
+                "num_arms": int(num_arms),
+                "zero_mean_arms_m": int(num_arms) - 2,
+                "gap_arm2": float(gap_arm2),
+                "time": int(time_value),
+                "mean_regret": float(mean_regret),
+                "standard_error": float(standard_error),
+                "regret_per_round": float(mean_regret / max(float(time_value), 1.0)),
+                "mean_pi1": float(result.pi1_sum[i] / n),
+                "mean_pi2": float(result.pi2_sum[i] / n),
+                "mean_other_mass": float(result.other_mass_sum[i] / n),
+                "num_trajectories": int(n),
+                "method": method,
+            }
+        )
+    return rows
+
+
+def run_fixed_gap_benchmark(
+    *,
+    outdir: Path,
+    gap_arm2: float,
+    num_arms: int,
+    horizon: int,
+    num_horizons: int,
+    trajectories: int,
+    workers: int,
+    chunk_trajectories: int,
+    seed: int,
+    method: str,
+    max_mean_change: float,
+    max_noise_change: float,
+    max_block_size: int,
+    block_quantile: float,
+    exact_small_block_threshold: int,
+    regret_scale: float,
+) -> List[Path]:
+    checkpoints = make_log_checkpoints(horizon, num_horizons)
+    benchmark_schedules = [
+        ("inv_sqrt_tplus1", r"$\eta_t=1/\sqrt{t+1}$"),
+        ("constant_delta_squared", r"$\eta=\Delta^2$"),
+    ]
+
+    all_rows: List[Dict[str, object]] = []
+
+    for schedule_index, (schedule, _label) in enumerate(benchmark_schedules):
+        result = simulate_parallel(
+            gap_arm2=float(gap_arm2),
+            num_arms=int(num_arms),
+            horizon=int(horizon),
+            checkpoints=checkpoints,
+            trajectories=int(trajectories),
+            workers=int(workers),
+            chunk_trajectories=int(chunk_trajectories),
+            seed=int(seed) + 777_001 + 99_991 * schedule_index,
+            schedule=schedule,
+            method=str(method),
+            max_mean_change=float(max_mean_change),
+            max_noise_change=float(max_noise_change),
+            max_block_size=int(max_block_size),
+            block_quantile=float(block_quantile),
+            exact_small_block_threshold=int(exact_small_block_threshold),
+        )
+        all_rows.extend(
+            benchmark_rows_from_result(
+                result=result,
+                gap_arm2=float(gap_arm2),
+                num_arms=int(num_arms),
+                schedule=schedule,
+                method=method,
+            )
+        )
+
+    csv_path = outdir / "fixed_gap_stepsize_benchmark.csv"
+    write_rows_csv(csv_path, all_rows)
+
+    rows_by_schedule: Dict[str, List[Dict[str, object]]] = {}
+    for row in all_rows:
+        rows_by_schedule.setdefault(str(row["schedule"]), []).append(row)
+
+    label_map = dict(benchmark_schedules)
+    scale = float(regret_scale)
+    ylabel = "Average regret" if scale == 1.0 else rf"Average regret / ${scale:.0e}$"
+    paths: List[Path] = [csv_path]
+
+    fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=180)
+    for schedule, rows in rows_by_schedule.items():
+        rows = sorted(rows, key=lambda r: int(r["time"]))
+        t = np.array([float(r["time"]) for r in rows])
+        regret = np.array([float(r["mean_regret"]) for r in rows])
+        se = np.array([float(r["standard_error"]) for r in rows])
+        ax.plot(t, regret / scale, linewidth=2.5, label=label_map.get(schedule, schedule))
+        ax.fill_between(t, (regret - 2.0 * se) / scale, (regret + 2.0 * se) / scale, alpha=0.14)
+    ax.set_xlabel("Time")
+    ax.set_ylabel(ylabel)
+    ax.set_title(rf"Fixed-gap benchmark, $K={num_arms}$, $\Delta={gap_arm2:.4g}$")
+    style_axis(ax)
+    ax.legend()
+    fig.tight_layout()
+    path = outdir / "fixed_gap_stepsize_benchmark_original_scale.png"
+    fig.savefig(path)
+    plt.close(fig)
+    paths.append(path)
+
+    fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=180)
+    for schedule, rows in rows_by_schedule.items():
+        rows = sorted(rows, key=lambda r: int(r["time"]))
+        t = np.array([float(r["time"]) for r in rows])
+        regret = np.array([float(r["mean_regret"]) for r in rows])
+        positive = (t > 0) & (regret > 0)
+        ax.plot(t[positive], regret[positive] / scale, linewidth=2.5, label=label_map.get(schedule, schedule))
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("Time")
+    ax.set_ylabel(ylabel)
+    ax.set_title("Fixed-gap benchmark, log-log scale")
+    style_axis(ax, log_grid=True)
+    ax.legend()
+    fig.tight_layout()
+    path = outdir / "fixed_gap_stepsize_benchmark_loglog.png"
+    fig.savefig(path)
+    plt.close(fig)
+    paths.append(path)
+
+    fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=180)
+    for schedule, rows in rows_by_schedule.items():
+        rows = sorted(rows, key=lambda r: int(r["time"]))
+        t = np.array([float(r["time"]) for r in rows])
+        regret_per_round = np.array([float(r["regret_per_round"]) for r in rows])
+        ax.plot(t, regret_per_round, linewidth=2.5, label=label_map.get(schedule, schedule))
+    ax.set_xscale("log")
+    ax.set_xlabel("Time")
+    ax.set_ylabel(r"$R_t/t$")
+    ax.set_title("Fixed-gap benchmark: average regret per round")
+    style_axis(ax, log_grid=True)
+    ax.legend()
+    fig.tight_layout()
+    path = outdir / "fixed_gap_stepsize_benchmark_regret_per_round.png"
+    fig.savefig(path)
+    plt.close(fig)
+    paths.append(path)
+
+    return paths
 
 
 def run_combine_plot(args: argparse.Namespace) -> None:
@@ -1241,23 +1281,19 @@ def run_combine_plot(args: argparse.Namespace) -> None:
 
     for num_arms in arms_list:
         all_rows, hardest_rows = combine_envelope_for_num_arms(outdir, num_arms)
-
         hardest_by_arms[num_arms] = hardest_rows
         all_rows_combined.extend(all_rows)
-
         write_rows_csv(outdir / f"combined_envelope_by_gap_arms_{num_arms}.csv", all_rows)
         write_rows_csv(outdir / f"hardest_gap_by_time_arms_{num_arms}.csv", hardest_rows)
-
         print(f"Combined K={num_arms}: {len(all_rows)} rows, {len(hardest_rows)} horizons")
 
     write_rows_csv(outdir / "combined_envelope_by_gap_all_arms.csv", all_rows_combined)
 
     paths: List[Path] = []
-
     main_hardest = hardest_by_arms[main_num_arms]
 
     paths.extend(plot_worst_case_regret_main(main_hardest, outdir, args.regret_scale))
-    paths.append(plot_worst_gap_vs_prediction(main_hardest, outdir, parse_float_list(args.c_values)))
+    paths.extend(plot_worst_gap_vs_prediction(main_hardest, outdir, parse_float_list(args.c_values)))
 
     if len(hardest_by_arms) >= 2:
         paths.extend(plot_few_arms_comparison(hardest_by_arms, outdir, args.regret_scale))
@@ -1265,14 +1301,7 @@ def run_combine_plot(args: argparse.Namespace) -> None:
     if args.make_sample_path:
         for num_arms in arms_list:
             hardest_rows = hardest_by_arms[num_arms]
-
-            final_hardest_gap = float(hardest_rows[-1]["hardest_gap_arm2"])
-
-            if args.sample_gap is not None:
-                gap_for_sample = float(args.sample_gap)
-            else:
-                gap_for_sample = final_hardest_gap
-
+            gap_for_sample = float(args.sample_gap) if args.sample_gap is not None else float(hardest_rows[-1]["hardest_gap_arm2"])
             path = plot_sample_paths(
                 outdir=outdir,
                 gap_arm2=gap_for_sample,
@@ -1288,13 +1317,33 @@ def run_combine_plot(args: argparse.Namespace) -> None:
                 block_quantile=args.block_quantile,
                 exact_small_block_threshold=args.exact_small_block_threshold,
             )
-
             paths.append(path)
-
             print(f"Sample path for K={num_arms} used gap {gap_for_sample:.8g}")
 
-    print("Generated plots/files:")
+    if args.make_benchmark:
+        benchmark_gap = float(main_hardest[-1]["hardest_gap_arm2"])
+        benchmark_paths = run_fixed_gap_benchmark(
+            outdir=outdir,
+            gap_arm2=benchmark_gap,
+            num_arms=main_num_arms,
+            horizon=args.horizon,
+            num_horizons=args.benchmark_checkpoints,
+            trajectories=args.benchmark_trajectories,
+            workers=args.workers,
+            chunk_trajectories=args.chunk_trajectories,
+            seed=args.seed + 555_111,
+            method=args.method,
+            max_mean_change=args.max_mean_change,
+            max_noise_change=args.max_noise_change,
+            max_block_size=args.max_block_size,
+            block_quantile=args.block_quantile,
+            exact_small_block_threshold=args.exact_small_block_threshold,
+            regret_scale=args.regret_scale,
+        )
+        paths.extend(benchmark_paths)
+        print(f"Fixed-gap benchmark used final-horizon hardest gap {benchmark_gap:.8g}")
 
+    print("Generated files:")
     for path in paths:
         print(f"  {path}")
 
@@ -1307,12 +1356,10 @@ def run_sample_path_command(args: argparse.Namespace) -> None:
         gap = float(args.sample_gap)
     else:
         hardest_path = outdir / f"hardest_gap_by_time_arms_{int(args.num_arms)}.csv"
-
         if not hardest_path.exists():
             raise FileNotFoundError(
                 f"{hardest_path} does not exist. Run combine-plot first or pass --sample-gap."
             )
-
         rows = read_rows_csv(hardest_path)
         gap = float(rows[-1]["hardest_gap_arm2"])
 
@@ -1331,29 +1378,19 @@ def run_sample_path_command(args: argparse.Namespace) -> None:
         block_quantile=args.block_quantile,
         exact_small_block_threshold=args.exact_small_block_threshold,
     )
-
     print(f"Wrote {path}")
 
 
-# =============================================================================
-# Command line interface
-# =============================================================================
-
 def add_common_sim_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--outdir", default=DEFAULT_OUTDIR)
-
-    # IMPORTANT: default is 1000, not 40.
     parser.add_argument("--num-arms", type=int, default=DEFAULT_MAIN_NUM_ARMS)
-
     parser.add_argument("--horizon", type=int, default=DEFAULT_HORIZON)
     parser.add_argument("--num-horizons", type=int, default=DEFAULT_NUM_HORIZONS)
     parser.add_argument("--trajectories", type=int, default=DEFAULT_TRAJECTORIES)
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--chunk-trajectories", type=int, default=DEFAULT_CHUNK_TRAJECTORIES)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
-
     parser.add_argument("--method", choices=["approx", "exact"], default="approx")
-
     parser.add_argument("--max-mean-change", type=float, default=0.08)
     parser.add_argument("--max-noise-change", type=float, default=0.35)
     parser.add_argument("--max-block-size", type=int, default=10_000_000)
@@ -1362,10 +1399,7 @@ def add_common_sim_args(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Lower-bound bandit experiments for eta_t = 1/sqrt(t+1)"
-    )
-
+    parser = argparse.ArgumentParser(description="Lower-bound bandit experiments for eta_t = 1/sqrt(t+1)")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     sweep_one = subparsers.add_parser("sweep-one", help="Run one gap value for one K")
@@ -1378,36 +1412,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     sweep_all = subparsers.add_parser("sweep-all", help="Run all gaps locally")
     add_common_sim_args(sweep_all)
-
-    # IMPORTANT: default is 1000,10, not 40,10.
     sweep_all.add_argument("--num-arms-list", default=DEFAULT_NUM_ARMS_LIST)
-
     sweep_all.add_argument("--num-gaps", type=int, default=DEFAULT_NUM_GAPS)
     sweep_all.add_argument("--gap-start", type=float, default=0.0)
     sweep_all.add_argument("--gap-stop", type=float, default=1.0)
     sweep_all.set_defaults(func=run_sweep_all)
 
-    combine_plot = subparsers.add_parser(
-        "combine-plot",
-        help="Combine sweep outputs and create plots",
-    )
+    combine_plot = subparsers.add_parser("combine-plot", help="Combine sweep outputs and create plots")
     add_common_sim_args(combine_plot)
-
-    # IMPORTANT: default is 1000,10, not 40,10.
     combine_plot.add_argument("--num-arms-list", default=DEFAULT_NUM_ARMS_LIST)
-
     combine_plot.add_argument("--regret-scale", type=float, default=1_000_000.0)
     combine_plot.add_argument("--c-values", default="0.5,1,2,4")
     combine_plot.add_argument("--make-sample-path", action="store_true")
     combine_plot.add_argument("--sample-gap", type=float, default=None)
     combine_plot.add_argument("--sample-paths", type=int, default=40)
     combine_plot.add_argument("--sample-checkpoints", type=int, default=250)
+    combine_plot.add_argument("--make-benchmark", action="store_true")
+    combine_plot.add_argument("--benchmark-trajectories", type=int, default=10_000)
+    combine_plot.add_argument("--benchmark-checkpoints", type=int, default=250)
     combine_plot.set_defaults(func=run_combine_plot)
 
-    sample_path = subparsers.add_parser(
-        "sample-path",
-        help="Make one pi1 sample-path plot",
-    )
+    sample_path = subparsers.add_parser("sample-path", help="Make one pi1 sample-path plot")
     add_common_sim_args(sample_path)
     sample_path.add_argument("--sample-gap", type=float, default=None)
     sample_path.add_argument("--sample-paths", type=int, default=40)
