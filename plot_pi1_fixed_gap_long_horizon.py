@@ -473,7 +473,7 @@ def main() -> None:
     parser.add_argument("--num-paths", type=int, default=40)
     parser.add_argument("--num-checkpoints", type=int, default=400)
     parser.add_argument("--seed", type=int, default=20260310)
-    parser.add_argument("--arms-list", default="3,1000")
+    parser.add_argument("--arms-list", default="3,40")
     parser.add_argument("--max-mean-change", type=float, default=0.08)
     parser.add_argument("--max-noise-change", type=float, default=0.35)
     parser.add_argument("--max-block-size", type=int, default=1_000_000_000)
