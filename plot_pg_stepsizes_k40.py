@@ -437,7 +437,7 @@ def draw_panel(ax, result, transformed, show_y_ticks, show_legend=False):
     ax.set_xscale("log")
     ax.set_xlim(t_grid[0], t_grid[-1])
     ax.grid(True, which="both", alpha=0.28, linewidth=0.7)
-    ax.set_title(result["title"], fontsize=11)
+    #ax.set_title(result["title"], fontsize=11)
     ax.set_xlabel("Time")
 
     setup_y_axis(ax, transformed=transformed, show_y_ticks=show_y_ticks)
@@ -458,7 +458,7 @@ def plot_single(result, outbase, main_title, transformed):
     )
 
     ax.set_ylabel("Optimal Action Probability")
-    fig.suptitle(main_title, fontsize=13, y=1.02)
+    # fig.suptitle(main_title, fontsize=13, y=1.02)
     fig.tight_layout()
 
     fig.savefig(outbase + ".png", dpi=220, bbox_inches="tight")
@@ -501,7 +501,7 @@ def plot_grid(results, layout, outbase, main_title, transformed):
     else:
         raise ValueError(f"Unknown layout={layout}")
 
-    fig.suptitle(main_title, fontsize=13, y=1.02)
+    #fig.suptitle(main_title, fontsize=13, y=1.02)
     fig.supylabel("Optimal Action Probability", fontsize=11)
 
     fig.tight_layout()
