@@ -19,7 +19,7 @@ export NUMEXPR_NUM_THREADS=1
 
 python plot_pi1_fixed_gap_long_horizon.py \
   --outdir pi1_fixed_gap_long_horizon_results \
-  --horizon 1000000000\
+  --horizon 100000000000\
   --delta 0.02\
   --num-paths 40 \
   --num-checkpoints 400 \
