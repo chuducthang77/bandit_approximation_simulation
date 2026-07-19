@@ -553,7 +553,7 @@ def plot_four_panel_pi1(args) -> Path:
 
     fig.tight_layout(rect=(0.02, 0.04, 1.0, 1.0))
 
-    output_path = outdir / "pi1_four_gaps_1x4_linear.png"
+    output_path = outdir / "pi1_four_gaps_1x4_linear.pdf"
     fig.savefig(output_path)
     plt.close(fig)
 
