@@ -405,137 +405,200 @@ def simulate_pi1_paths(
     return pi1_paths
 
 
-def schedule_label(schedule: str, delta: float) -> str:
-    if schedule == "inv_sqrt_tplus1":
-        return r"$\eta_t = 1/\sqrt{t+1}$"
-    if schedule == "constant_delta_squared":
-        return rf"$\eta = \Delta^2 = {delta**2:.2e}$"
-    return schedule
+
+# -----------------------------------------------------------------------------
+# Four-gap 1x4 plotting code
+# -----------------------------------------------------------------------------
+
+FOUR_PANEL_CASES = [
+    {"delta": 0.2,   "horizon": 100_000_000_000},          # 10^11
+    {"delta": 0.05,  "horizon": 100_000_000_000},          # 10^11
+    {"delta": 0.02,  "horizon": 100_000_000_000},          # 10^11
+    {"delta": 0.002, "horizon": 1_000_000_000_000_000},    # 10^15
+]
+
+DEFAULT_NUM_ARMS = 3
+DEFAULT_NUM_PATHS = 40
+DEFAULT_NUM_CHECKPOINTS = 500
+DEFAULT_SCHEDULE = "inv_sqrt_tplus1"
 
 
-def plot_pi1_paths(
-    *,
-    checkpoints: np.ndarray,
-    pi1_paths: np.ndarray,
-    num_arms: int,
-    delta: float,
-    schedule: str,
-    outdir: Path,
-    y_mode: str,
-) -> Path:
-    t = checkpoints.astype(np.float64)
-    paths = np.clip(pi1_paths, 1e-12, 1.0 - 1e-12)
-    avg = np.mean(paths, axis=1)
-
-    fig, ax = plt.subplots(figsize=(8.0, 5.4), dpi=180)
-
-    for j in range(paths.shape[1]):
-        ax.plot(t, paths[:, j], color="0.7", alpha=0.5, linewidth=1.0)
-
-    ax.plot(t, avg, color="red", linewidth=2.8, label="average")
-
-    ax.set_xscale("log")
-    ax.set_xlabel("Time")
-    ax.set_ylabel(r"$\pi_t(1)$")
-
-    if y_mode == "logit":
-        ax.set_yscale("logit")
-        ax.set_ylim(1.0 / (10.0 * num_arms), 1.0 - 1e-4)
-        title_suffix = "current scale (logit y-axis)"
-        style_axis(ax, log_grid=True)
-        file_suffix = "logit"
-    elif y_mode == "linear":
-        ax.set_ylim(0.0, 1.0)
-        title_suffix = "original scale (linear y-axis)"
-        style_axis(ax, log_grid=True)
-        file_suffix = "linear"
-    else:
-        raise ValueError("y_mode must be 'logit' or 'linear'")
-
-    ax.set_title(
-        rf"Sample paths of $\pi_t(1)$, $K={num_arms}$, $\Delta={delta}$" "\n"
-        rf"{schedule_label(schedule, delta)}, {title_suffix}"
-    )
-    ax.legend()
-    fig.tight_layout()
-
-    path = outdir / f"sample_path_pi1_{file_suffix}_K{num_arms}_{schedule}.png"
-    fig.savefig(path)
-    plt.close(fig)
-    return path
+def case_data_path(outdir: Path, case_index: int) -> Path:
+    case = FOUR_PANEL_CASES[int(case_index)]
+    delta = case["delta"]
+    return outdir / f"case_{case_index}_delta_{delta:g}.npz"
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--outdir", default="pi1_fixed_gap_long_horizon_results")
-    parser.add_argument("--horizon", type=int, default=100_000_000_000)   # 1e11
-    parser.add_argument("--delta", type=float, default=0.002)
-    parser.add_argument("--num-paths", type=int, default=40)
-    parser.add_argument("--num-checkpoints", type=int, default=400)
-    parser.add_argument("--seed", type=int, default=20260310)
-    parser.add_argument("--arms-list", default="3,40")
-    parser.add_argument("--max-mean-change", type=float, default=0.08)
-    parser.add_argument("--max-noise-change", type=float, default=0.35)
-    parser.add_argument("--max-block-size", type=int, default=1_000_000_000)
-    parser.add_argument("--block-quantile", type=float, default=0.995)
-    parser.add_argument("--exact-small-block-threshold", type=int, default=64)
-    args = parser.parse_args()
+def simulate_one_four_panel_case(args, case_index: int) -> Path:
+    if case_index < 0 or case_index >= len(FOUR_PANEL_CASES):
+        raise ValueError("case_index must be 0, 1, 2, or 3")
 
     outdir = Path(args.outdir)
     ensure_dir(outdir)
 
-    arms_list = [int(x.strip()) for x in args.arms_list.split(",") if x.strip()]
-    schedules = ["inv_sqrt_tplus1", "constant_delta_squared"]
-    checkpoints = make_log_checkpoints(int(args.horizon), int(args.num_checkpoints))
+    case = FOUR_PANEL_CASES[int(case_index)]
+    delta = float(case["delta"])
+    horizon = int(case["horizon"])
 
-    generated = []
+    checkpoints = make_log_checkpoints(horizon, int(args.num_checkpoints))
 
-    for num_arms in arms_list:
-        for schedule in schedules:
-            print(f"Running K={num_arms}, schedule={schedule}, Delta={args.delta}, T={args.horizon}")
+    seed = int(args.seed) + 100_003 * int(case_index)
 
-            pi1_paths = simulate_pi1_paths(
-                num_arms=int(num_arms),
-                delta=float(args.delta),
-                horizon=int(args.horizon),
-                checkpoints=checkpoints,
-                num_paths=int(args.num_paths),
-                seed=int(args.seed) + 1009 * int(num_arms) + (0 if schedule == "inv_sqrt_tplus1" else 10_000_019),
-                schedule=schedule,
-                max_mean_change=float(args.max_mean_change),
-                max_noise_change=float(args.max_noise_change),
-                max_block_size=int(args.max_block_size),
-                block_quantile=float(args.block_quantile),
-                exact_small_block_threshold=int(args.exact_small_block_threshold),
+    print(
+        f"Running case {case_index}: "
+        f"K={args.num_arms}, Delta={delta:g}, horizon={horizon}, "
+        f"paths={args.num_paths}, schedule={DEFAULT_SCHEDULE}"
+    )
+
+    pi1_paths = simulate_pi1_paths(
+        num_arms=int(args.num_arms),
+        delta=delta,
+        horizon=horizon,
+        checkpoints=checkpoints,
+        num_paths=int(args.num_paths),
+        seed=seed,
+        schedule=DEFAULT_SCHEDULE,
+        max_mean_change=float(args.max_mean_change),
+        max_noise_change=float(args.max_noise_change),
+        max_block_size=int(args.max_block_size),
+        block_quantile=float(args.block_quantile),
+        exact_small_block_threshold=int(args.exact_small_block_threshold),
+    )
+
+    output_path = case_data_path(outdir, case_index)
+
+    np.savez_compressed(
+        output_path,
+        checkpoints=checkpoints,
+        pi1_paths=pi1_paths,
+        delta=delta,
+        horizon=horizon,
+        num_arms=int(args.num_arms),
+        num_paths=int(args.num_paths),
+        schedule=DEFAULT_SCHEDULE,
+    )
+
+    print(f"Wrote {output_path}")
+    return output_path
+
+
+def plot_four_panel_pi1(args) -> Path:
+    outdir = Path(args.outdir)
+    ensure_dir(outdir)
+
+    fig, axes = plt.subplots(
+        1,
+        4,
+        figsize=(22.0, 5.0),
+        dpi=180,
+        sharey=True,
+    )
+
+    for case_index, ax in enumerate(axes):
+        data_path = case_data_path(outdir, case_index)
+
+        if not data_path.exists():
+            raise FileNotFoundError(
+                f"Missing {data_path}. "
+                f"Run case {case_index} first, or run without --plot-only."
             )
 
-            generated.append(
-                plot_pi1_paths(
-                    checkpoints=checkpoints,
-                    pi1_paths=pi1_paths,
-                    num_arms=int(num_arms),
-                    delta=float(args.delta),
-                    schedule=schedule,
-                    outdir=outdir,
-                    y_mode="logit",
-                )
+        data = np.load(data_path)
+
+        checkpoints = data["checkpoints"].astype(np.float64)
+        pi1_paths = np.clip(data["pi1_paths"], 0.0, 1.0)
+        delta = float(data["delta"])
+        horizon = int(data["horizon"])
+
+        average_path = np.mean(pi1_paths, axis=1)
+
+        for path_index in range(pi1_paths.shape[1]):
+            ax.plot(
+                checkpoints,
+                pi1_paths[:, path_index],
+                color="0.72",
+                alpha=0.45,
+                linewidth=0.9,
             )
 
-            generated.append(
-                plot_pi1_paths(
-                    checkpoints=checkpoints,
-                    pi1_paths=pi1_paths,
-                    num_arms=int(num_arms),
-                    delta=float(args.delta),
-                    schedule=schedule,
-                    outdir=outdir,
-                    y_mode="linear",
-                )
-            )
+        ax.plot(
+            checkpoints,
+            average_path,
+            color="red",
+            linewidth=2.8,
+            label="average",
+        )
 
-    print("\nGenerated files:")
-    for path in generated:
-        print(path)
+        ax.set_xscale("log")
+        ax.set_xlim(1, horizon)
+        ax.set_ylim(0.0, 1.0)
+
+        ax.set_title(rf"$\Delta={delta:g}$", fontsize=16)
+
+        # Major grid only, less dense.
+        ax.grid(True, which="major", alpha=0.28, linewidth=0.8)
+        ax.grid(False, which="minor")
+
+        # No repeated per-panel x-labels.
+        ax.set_xlabel("")
+
+        if case_index == 0:
+            ax.set_ylabel(r"$\pi_t(1)$", fontsize=15)
+
+        if case_index == len(axes) - 1:
+            ax.legend(loc="lower right", frameon=True)
+
+    # One shared x-axis label. No global title.
+    fig.supxlabel("Time", fontsize=16)
+
+    fig.tight_layout(rect=(0.02, 0.04, 1.0, 1.0))
+
+    output_path = outdir / "pi1_four_gaps_1x4_linear.png"
+    fig.savefig(output_path)
+    plt.close(fig)
+
+    print(f"Wrote {output_path}")
+    return output_path
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="1x4 sample-path plot for pi_t(1), K=3, eta_t=1/sqrt(t+1)."
+    )
+
+    parser.add_argument("--outdir", default="pi1_four_gaps_results")
+    parser.add_argument("--num-arms", type=int, default=DEFAULT_NUM_ARMS)
+    parser.add_argument("--num-paths", type=int, default=DEFAULT_NUM_PATHS)
+    parser.add_argument("--num-checkpoints", type=int, default=DEFAULT_NUM_CHECKPOINTS)
+    parser.add_argument("--seed", type=int, default=20260310)
+
+    parser.add_argument("--case-index", type=int, default=None)
+    parser.add_argument(
+        "--plot-only",
+        action="store_true",
+        help="Only combine existing case_*.npz files into the 1x4 plot.",
+    )
+
+    parser.add_argument("--max-mean-change", type=float, default=0.08)
+    parser.add_argument("--max-noise-change", type=float, default=0.35)
+    parser.add_argument("--max-block-size", type=int, default=10_000_000_000_000)
+    parser.add_argument("--block-quantile", type=float, default=0.995)
+    parser.add_argument("--exact-small-block-threshold", type=int, default=64)
+
+    args = parser.parse_args()
+
+    if args.plot_only:
+        plot_four_panel_pi1(args)
+        return
+
+    if args.case_index is not None:
+        simulate_one_four_panel_case(args, int(args.case_index))
+        return
+
+    for case_index in range(len(FOUR_PANEL_CASES)):
+        simulate_one_four_panel_case(args, case_index)
+
+    plot_four_panel_pi1(args)
 
 
 if __name__ == "__main__":
