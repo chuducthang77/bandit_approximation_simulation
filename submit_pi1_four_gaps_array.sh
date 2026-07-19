@@ -21,7 +21,7 @@ export NUMEXPR_NUM_THREADS=1
 python plot_pi1_fixed_gap_long_horizon.py \
   --outdir pi1_four_gaps_results \
   --case-index "${SLURM_ARRAY_TASK_ID}" \
-  --num-arms 4 \
+  --num-arms 3 \
   --num-paths 40 \
   --num-checkpoints 500 \
   --max-mean-change 0.08 \
